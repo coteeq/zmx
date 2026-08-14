@@ -1983,8 +1983,12 @@ fn attach(daemon: *Daemon) !void {
         if (stdin_is_tty) {
             _ = cross.c.tcsetattr(posix.STDIN_FILENO, cross.c.TCSAFLUSH, &orig_termios);
         }
-        // Reset terminal modes on detach:
-        const restore_seq = "\x1bc";
+        // Pop the terminal title we pushed on attach (XTWINOPS 23;2t) to
+        // restore whatever the outer shell had set before, then do a full
+        // terminal reset (RIS) for the mode cleanup. The pop must come first:
+        // RIS clears the terminal's title stack, so restoring afterwards would
+        // find an empty stack and leave the "zmx: ..." title stuck.
+        const restore_seq = "\x1b[23;2t" ++ "\x1bc";
         _ = posix.write(posix.STDOUT_FILENO, restore_seq) catch {};
     }
 
@@ -2010,6 +2014,22 @@ fn attach(daemon: *Daemon) !void {
     // the session restore.
     const clear_seq = "\x1b[2J\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
+
+    // Advertise the session name in the terminal tab/window title. Push the
+    // current title onto the terminal's stack first (XTWINOPS 22;2t) so the
+    // detach handler can restore it, then set it with OSC 2. BEL-terminated
+    // for the widest terminal support.
+    if (stdin_is_tty) {
+        var title_buf: [512]u8 = undefined;
+        const title_seq = std.fmt.bufPrint(
+            &title_buf,
+            "\x1b[22;2t\x1b]2;zmx: {s}\x07",
+            .{daemon.session_name},
+        ) catch null;
+        if (title_seq) |seq| {
+            _ = posix.write(posix.STDOUT_FILENO, seq) catch {};
+        }
+    }
 
     const looper = try clientLoop(client_sock);
     switch (looper.kind) {
